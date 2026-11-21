@@ -1,79 +1,132 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// Shadow Ledger — staged states for screenshots.
+// `?shot=start|play|alert|win` puts the game into a fixed, deterministic
+// scene so a screenshot taken on any machine shows the same moment.
+// Times are fixed; guards are placed at fixed patrol points; nothing
+// here reads Math.random or the clock.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { LEVEL } from './level.js';
+import { createGuard } from './guards.js';
+import { createPlayer } from './player.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function baseState() {
+  return {
+    phase: 'playing',
+    player: createPlayer(LEVEL.spawn),
+    guards: LEVEL.guards.map(createGuard),
+    intel: LEVEL.intel.map((item) => ({ ...item, collected: false })),
+    collected: 0,
+    total: LEVEL.intel.length,
+    timeSec: 0,
+    detections: 0,
+    time: 0, // scene clock, fixed per shot
+    hud: { collected: 0, total: LEVEL.intel.length, timeSec: 0, timeText: '00:00', alert: 0, detections: 0 },
+  };
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function syncHud(state) {
+  state.hud.collected = state.collected;
+  state.hud.total = state.total;
+  state.hud.timeSec = state.timeSec;
+  const mm = String(Math.floor(state.timeSec / 60)).padStart(2, '0');
+  const ss = String(Math.floor(state.timeSec % 60)).padStart(2, '0');
+  state.hud.timeText = `${mm}:${ss}`;
+  state.hud.alert = Math.max(0, ...state.guards.map((g) => g.suspicion));
+  state.hud.detections = state.detections;
 }
 
-/**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
- */
-export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
+// Place a guard at a patrol point with a chosen facing and state.
+function poseGuard(state, index, x, y, facing, guardState, suspicion) {
+  const guard = state.guards[index];
+  guard.x = x;
+  guard.y = y;
+  guard.facing = facing;
+  guard.state = guardState;
+  guard.suspicion = suspicion;
+  if (guardState === 'alerted' || guardState === 'suspicious') {
+    guard.lastSeen = { x: state.player.x, y: state.player.y };
   }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
+  return guard;
+}
+
+export function applyShot(state, shot) {
+  switch (shot) {
+    case 'start': {
+      // Title screen over the full hall: guards on patrol, cones lit.
+      state.phase = 'title';
+      state.time = 4.0;
+      state.timeSec = 0;
+      poseGuard(state, 0, 480, 135, 0, 'patrol', 0);
+      poseGuard(state, 1, 880, 380, Math.PI / 2, 'patrol', 0);
+      poseGuard(state, 2, 420, 560, Math.PI, 'patrol', 0);
+      poseGuard(state, 3, 560, 340, -Math.PI / 2, 'patrol', 0);
+      break;
+    }
+    case 'play': {
+      // Mid-run near miss: the courier crouches by a fern at the edge of
+      // a cone, two pages already recovered, one guard growing curious.
+      state.phase = 'playing';
+      state.time = 84.0;
+      state.timeSec = 84;
+      state.player.x = 292;
+      state.player.y = 232;
+      state.player.facing = Math.PI / 4;
+      state.player.sneaking = true;
+      state.player.hidden = true;
+      state.intel[0].collected = true;
+      state.intel[2].collected = true;
+      state.collected = 2;
+      poseGuard(state, 0, 420, 180, Math.PI / 2, 'suspicious', 0.62);
+      poseGuard(state, 1, 880, 300, Math.PI, 'patrol', 0);
+      poseGuard(state, 2, 300, 480, 0, 'patrol', 0);
+      poseGuard(state, 3, 560, 380, Math.PI, 'patrol', 0.1);
+      break;
+    }
+    case 'alert': {
+      // The chase: all three pages in hand, the courier sprinting for
+      // the exit with a guard in full pursuit, alarm meter maxed.
+      state.phase = 'playing';
+      state.time = 152.0;
+      state.timeSec = 152;
+      state.player.x = 780;
+      state.player.y = 130;
+      state.player.facing = Math.PI / 4;
+      state.player.running = true;
+      state.player.moving = true;
+      for (const item of state.intel) item.collected = true;
+      state.collected = 3;
+      state.detections = 1;
+      poseGuard(state, 0, 660, 200, Math.PI / 4, 'alerted', 1);
+      poseGuard(state, 1, 880, 260, -Math.PI / 2, 'suspicious', 0.7);
+      poseGuard(state, 2, 500, 500, -Math.PI / 2, 'patrol', 0);
+      poseGuard(state, 3, 620, 300, -Math.PI / 4, 'patrol', 0.2);
+      break;
+    }
+    case 'win': {
+      // The escape: courier at the open exit door, ledger complete.
+      state.phase = 'won';
+      state.time = 168.0;
+      state.timeSec = 168;
+      state.player.x = 890;
+      state.player.y = 62;
+      state.player.facing = -Math.PI / 2;
+      for (const item of state.intel) item.collected = true;
+      state.collected = 3;
+      state.detections = 0;
+      poseGuard(state, 0, 500, 135, Math.PI, 'patrol', 0);
+      poseGuard(state, 1, 880, 420, Math.PI / 2, 'patrol', 0);
+      poseGuard(state, 2, 300, 560, 0, 'patrol', 0);
+      poseGuard(state, 3, 480, 340, Math.PI / 2, 'patrol', 0);
+      break;
+    }
+    default:
+      break;
   }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  syncHud(state);
+  return state;
+}
+
+export function newState() {
+  const state = baseState();
+  syncHud(state);
+  return state;
 }

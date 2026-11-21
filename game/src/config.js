@@ -1,61 +1,84 @@
-// Every tuning number and colour in one place. The playfield is a fixed 1280x720 logical area;
-// the renderer scales it to the window, so no rule below depends on the screen size.
+// Shadow Ledger — shared tuning constants for the whole game.
+// One place for every number a designer would tweak: sizes, speeds,
+// detection rates and colours. Nothing here draws or moves anything.
+export const GAME = {
+  width: 960,
+  height: 640,
+  tile: 32,
+};
 
-export const FIELD = { width: 1280, height: 720, groundY: 664 };
-
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display's rate. */
-export const STEP = 1 / 60;
-
+// The player: a night courier in a dark coat. Sneaking is slower and
+// quieter; running is fast but loud and easy to spot.
 export const PLAYER = {
-  width: 72,
-  height: 24,
-  speed: 560,
-  invulnerable: 1.5,
+  radius: 11,
+  walkSpeed: 132, // pixels per second
+  sneakSpeed: 72,
+  runSpeed: 178,
+  noiseRadiusWalk: 46,
+  noiseRadiusRun: 128,
+  noiseRadiusSneak: 16,
 };
 
-export const LIVES = 3;
-
-export const BLOCK = {
-  minWidth: 40,
-  maxWidth: 110,
-  height: 36,
-  speed: 240,
-  speedPerLevel: 30,
-  speedJitter: 90,
-  interval: 0.55,
-  intervalScale: 0.88,
-  minInterval: 0.14,
-  dodgePoints: 1,
+// Guards: patrol slowly, investigate faster, chase fastest of all.
+export const GUARD = {
+  radius: 12,
+  patrolSpeed: 52,
+  investigateSpeed: 88,
+  chaseSpeed: 128,
+  searchSpeed: 66,
+  waypointPause: 1.4, // seconds spent looking around at each waypoint
+  viewDistance: 215,
+  viewHalfAngle: 0.62, // radians either side of facing (~71 degree cone)
+  hearRadius: 150,
+  catchDistance: 22,
+  // Suspicion 0..1. It climbs while the player is seen, falls otherwise.
+  // Sneaking, distance and bushes all slow the climb.
+  suspicionGainBase: 0.85, // per second, point blank, standing, lit
+  suspicionGainFar: 0.34, // per second at the far edge of the cone
+  suspicionDecay: 0.22, // per second while unseen
+  suspiciousAt: 0.35, // guard turns and investigates
+  alertedAt: 1.0, // guard gives chase
+  loseSightAlert: 3.5, // seconds unseen while alerted before searching
+  searchTime: 3.2, // seconds spent scanning the last-seen spot
+  bushHideDistance: 42, // a guard must be this close to spot a hidden player
 };
 
-export const COIN = {
-  size: 24,
-  speed: 190,
-  speedPerLevel: 14,
-  interval: 1.4,
-  intervalJitter: 0.8,
-  points: 10,
+// Colours: night archive. Warm lamplight pools, cold shadow everywhere
+// else; danger is always the same red so it reads at a glance.
+export const COLORS = {
+  floorDark: '#1c1a24',
+  floorLight: '#232030',
+  floorLine: '#2c2940',
+  wall: '#4a4560',
+  wallTop: '#5d5878',
+  crate: '#6b5232',
+  crateTop: '#8a6a42',
+  bush: '#2e5230',
+  bushTop: '#3f7044',
+  lampGlow: 'rgba(255, 196, 110, 0.10)',
+  coneCalm: 'rgba(255, 214, 120, 0.20)',
+  coneEdge: 'rgba(255, 214, 120, 0.55)',
+  coneSuspicious: 'rgba(255, 166, 66, 0.30)',
+  coneAlert: 'rgba(255, 64, 64, 0.32)',
+  guardBody: '#c94f4f',
+  guardDark: '#7e2f2f',
+  playerBody: '#e8d27a',
+  playerDark: '#a8892f',
+  intel: '#7de3ff',
+  exit: '#58d68d',
+  text: '#f2ead8',
+  dimText: '#a99f88',
 };
 
-/** Seconds of play per level, and the last level: speeds and spawn rates stop growing there. */
-export const LEVEL = { seconds: 12, max: 12 };
-
-/** How many falling things can exist at once; the pool is allocated once, at boot. */
-export const POOL_SIZE = 64;
-
-export const PALETTE = {
-  backdrop: '#11141b',
-  sky: '#1b1f2a',
-  ground: '#2a3040',
-  player: '#4fc3f7',
-  block: '#e5534b',
-  coin: '#f2c94c',
-  panel: '#252b38',
-  text: '#eef1f5',
-  muted: '#8b93a3',
-};
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where the best score is kept between visits (this browser only). */
-export const BEST_KEY = 'block-dodger.best';
+// A tiny deterministic generator so ambient details (floor speckles,
+// dust motes) are identical on every load. Seeded, never Math.random.
+export function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function next() {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}

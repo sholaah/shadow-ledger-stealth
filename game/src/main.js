@@ -1,134 +1,158 @@
-// Boot and the one loop: input is read every frame, the world advances in fixed 1/60 s steps
-// (several in a slow frame, none in a fast one), and the renderer paints what is there. The game
-// moves between four screens: title, play, paused and game over.
-//
-// ?seed=N fixes the falling pattern. ?shot=start|play|end (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-import { BEST_KEY, LIVES, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_HIT, EVENT_OVER } from './world.js';
-import { ACTION_CONFIRM, ACTION_PAUSE, createInput } from './input.js';
-import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
-import { stageShot } from './shots.js';
+// Shadow Ledger — the game loop and rules.
+// Owns the game state (title / playing / won / caught), steps the
+// player and the guards, collects ledger pages, opens the exit, and
+// counts detections. A `?shot=` query stages a fixed scene for
+// screenshots instead of starting a live game.
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped, not replayed. */
-const MAX_FRAME = 0.25;
+import { GAME } from './config.js';
+import { LEVEL, pointInBush } from './level.js';
+import { createPlayer, updatePlayer } from './player.js';
+import { createGuard, updateGuard, guardCaughtPlayer } from './guards.js';
+import { createInput } from './input.js';
+import { render } from './render.js';
+import { applyShot, newState } from './shots.js';
+import { audio } from './audio.js';
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = GAME.width;
+canvas.height = GAME.height;
 
 const params = new URLSearchParams(window.location.search);
 const shot = params.get('shot');
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
+const frozen = shot !== null; // staged scenes never advance
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
-
-function readBest() {
-  try {
-    return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0;
-  } catch {
-    return 0;
-  }
+let state = newState();
+if (frozen) {
+  applyShot(state, shot);
+} else {
+  state.phase = 'title';
 }
 
-function saveBest(value) {
-  try {
-    window.localStorage.setItem(BEST_KEY, String(value));
-  } catch {
-    // Storage can be off (private windows): the best score then lasts this visit only.
-  }
+const input = createInput(canvas);
+let lastStepWhole = 0;
+let lastSuspicious = new Set();
+
+function resetGame() {
+  state = newState();
+  state.phase = 'playing';
+  lastStepWhole = 0;
+  lastSuspicious = new Set();
 }
 
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world.state, scene.screen, scene.best);
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
+function startFromTitle() {
+  audio.unlock();
+  resetGame();
 }
 
-function runGame() {
-  const input = createInput(canvas);
-  let screen = SCREEN_TITLE;
-  let best = readBest();
-  let accumulator = 0;
-  let last = performance.now();
+canvas.addEventListener('click', () => {
+  if (state.phase === 'title') startFromTitle();
+  else if (state.phase === 'won' || state.phase === 'caught') resetGame();
+});
+window.addEventListener('keydown', (event) => {
+  if (event.code === 'Enter' || event.code === 'Space') {
+    if (state.phase === 'title') startFromTitle();
+    else if (state.phase === 'won' || state.phase === 'caught') resetGame();
+  }
+});
 
-  // Screen readers (and anyone watching the page's text) hear the screen changes and each hit.
-  function announce(message) {
-    status.textContent = message;
+// One fixed-size frame of play.
+function update(dt) {
+  if (state.phase !== 'playing') return;
+
+  state.time += dt;
+  state.timeSec += dt;
+
+  // Click-to-move destination, in game coordinates.
+  if (input.clickTarget) {
+    state.player.moveTarget = input.clickTarget;
+    input.clickTarget = null;
+  }
+  const noise = updatePlayer(state.player, input, dt);
+  state.player.hidden = pointInBush(state.player.x, state.player.y);
+
+  // Footsteps: one tap per stride, alternating feet.
+  const stepWhole = Math.floor(state.player.stepPhase);
+  if (state.player.moving && stepWhole !== lastStepWhole) {
+    lastStepWhole = stepWhole;
+    audio.footstep(stepWhole % 2 === 0, state.player.sneaking, state.player.running);
   }
 
-  function startGame() {
-    world.reset();
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-    announce(`Playing. ${LIVES} lives.`);
-  }
-
-  function endGame() {
-    screen = SCREEN_OVER;
-    if (world.state.score > best) {
-      best = world.state.score;
-      saveBest(best);
+  // Guards: step each one, watch for new suspicion and new alerts.
+  for (const guard of state.guards) {
+    const event = updateGuard(guard, state.player, dt);
+    if (event === 'spotted') {
+      state.detections += 1;
+      audio.alertSting();
     }
-    announce(`Game over. Score ${world.state.score}. Best ${best}.`);
+    if (guard.state === 'suspicious' && !lastSuspicious.has(guard.id)) {
+      audio.suspiciousBlip();
+    }
   }
+  lastSuspicious = new Set(state.guards.filter((g) => g.state === 'suspicious').map((g) => g.id));
 
-  function handleActions() {
-    const actions = input.takeActions();
-    if (actions & ACTION_CONFIRM && (screen === SCREEN_TITLE || screen === SCREEN_OVER)) startGame();
-    else if (actions & ACTION_PAUSE && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    } else if (actions & (ACTION_PAUSE | ACTION_CONFIRM) && screen === SCREEN_PAUSED) {
-      screen = SCREEN_PLAY;
-      announce('Playing.');
+  // Caught: any alerted guard that closes to touching distance.
+  for (const guard of state.guards) {
+    if (guardCaughtPlayer(guard, state.player)) {
+      state.phase = 'caught';
+      audio.caught();
+      break;
+    }
+  }
+  if (state.phase !== 'playing') return;
+
+  // Ledger pages: walk over one to pocket it.
+  for (const item of state.intel) {
+    if (!item.collected && Math.hypot(item.x - state.player.x, item.y - state.player.y) < 26) {
+      item.collected = true;
+      state.collected += 1;
+      audio.pickup();
     }
   }
 
-  function step() {
-    if (screen === SCREEN_TITLE) {
-      world.step(STEP, 0, true);
-      return;
-    }
-    const events = world.step(STEP, input.direction(), false);
-    if (events & EVENT_OVER) endGame();
-    else if (events & EVENT_HIT) announce(world.state.lives === 1 ? 'Hit. 1 life left.' : `Hit. ${world.state.lives} lives left.`);
+  // The exit opens once all three pages are recovered.
+  const exit = LEVEL.exit;
+  const atExit =
+    state.player.x > exit.x - 6 &&
+    state.player.x < exit.x + exit.w + 6 &&
+    state.player.y > exit.y - 6 &&
+    state.player.y < exit.y + exit.h + 6;
+  if (atExit && state.collected >= state.total) {
+    state.phase = 'won';
+    audio.win();
   }
 
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
-    last = now;
-    handleActions();
-    if (screen === SCREEN_TITLE || screen === SCREEN_PLAY) {
-      while (accumulator >= STEP && (screen === SCREEN_TITLE || screen === SCREEN_PLAY)) {
-        step();
-        accumulator -= STEP;
-      }
-    } else {
-      accumulator = 0;
-    }
-    renderer.draw(world.state, screen, best);
-  }
+  // HUD numbers, refreshed every frame from the live state.
+  state.hud.collected = state.collected;
+  state.hud.total = state.total;
+  state.hud.timeSec = state.timeSec;
+  const mm = String(Math.floor(state.timeSec / 60)).padStart(2, '0');
+  const ss = String(Math.floor(state.timeSec % 60)).padStart(2, '0');
+  state.hud.timeText = `${mm}:${ss}`;
+  state.hud.alert = Math.max(0, ...state.guards.map((g) => g.suspicion));
+  state.hud.detections = state.detections;
+}
 
-  // Leaving the tab pauses a running game rather than letting blocks fall unseen.
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      announce('Paused.');
-    }
-  });
-
-  announce('Block Dodger. Press Space or click to start.');
+// Staged scenes render one frozen frame; live play runs the loop.
+let lastTime = performance.now();
+function frame(now) {
+  const dt = Math.min((now - lastTime) / 1000, 0.05);
+  lastTime = now;
+  if (!frozen) update(dt);
+  render(ctx, state, state.time);
   requestAnimationFrame(frame);
 }
 
-if (shot) runShot(shot);
-else runGame();
+if (frozen) {
+  render(ctx, state, state.time);
+} else {
+  requestAnimationFrame(frame);
+}
+
+// Expose the live state for play-testing: the screenshot and test
+// scripts drive the game through this handle instead of guessing.
+window.__shadowLedger = {
+  state: () => state,
+  reset: resetGame,
+  version: 'shadow-ledger-1.0.0',
+};

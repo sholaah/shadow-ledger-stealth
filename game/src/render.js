@@ -1,141 +1,349 @@
-// Drawing only: the world's state and the current screen in, pixels out. The 1280x720 playfield
-// is scaled to fit the window and centred, the margin filled with the backdrop colour. Flat
-// rectangles and circles, canvas text for the HUD and the panels. Text that holds a number is
-// rebuilt only when the number changes, so a frame allocates nothing.
-import { FIELD, FONT, LIVES, PALETTE } from './config.js';
-import { KIND_COIN } from './world.js';
+// Shadow Ledger — render: everything the player sees.
+// Top-down night archive: checkerboard floor, warm lamp pools, dark
+// walls with lit tops, crates and ferns as cover, glowing ledger pages,
+// a green exit door, and guards drawn as red figures inside cones of
+// light that turn red as suspicion rises. The cone is clipped by walls
+// (see vision.js), so the light on screen is the light the guard sees.
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_OVER = 'over';
+import { GAME, COLORS, GUARD, mulberry32 } from './config.js';
+import { LEVEL } from './level.js';
+import { conePolygon } from './vision.js';
 
-/** The panel's width; its height grows with its lines: room for the title, the lines and the prompt. */
-const PANEL = { width: 600, top: 134, line: 34, bottom: 70 };
-const LIFE_SIZE = 20;
-const LIFE_GAP = 8;
+const speckle = mulberry32(20261121);
 
-function cachedLabel(prefix) {
-  let value = -1;
-  let text = '';
-  return function label(next) {
-    if (next !== value) {
-      value = next;
-      text = prefix + next;
+function drawFloor(ctx) {
+  for (let ty = 0; ty < GAME.height / GAME.tile; ty++) {
+    for (let tx = 0; tx < GAME.width / GAME.tile; tx++) {
+      ctx.fillStyle = (tx + ty) % 2 === 0 ? COLORS.floorDark : COLORS.floorLight;
+      ctx.fillRect(tx * GAME.tile, ty * GAME.tile, GAME.tile, GAME.tile);
     }
-    return text;
-  };
+  }
+  // Deterministic speckles: the same worn floorboards every load.
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
+  for (let i = 0; i < 160; i++) {
+    const x = speckle() * GAME.width;
+    const y = speckle() * GAME.height;
+    ctx.fillRect(x, y, 3, 2);
+  }
+  ctx.strokeStyle = COLORS.floorLine;
+  ctx.lineWidth = 1;
+  for (let x = 0; x <= GAME.width; x += GAME.tile) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, GAME.height);
+    ctx.stroke();
+  }
+  for (let y = 0; y <= GAME.height; y += GAME.tile) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(GAME.width, y);
+    ctx.stroke();
+  }
 }
 
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, x: 0, y: 0 };
-  const scoreLabel = cachedLabel('Score ');
-  const levelLabel = cachedLabel('Level ');
-  const finalLabel = cachedLabel('Score ');
-  const bestLabel = cachedLabel('Best ');
-
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    const width = Math.round(window.innerWidth * ratio);
-    const height = Math.round(window.innerHeight * ratio);
-    canvas.width = width;
-    canvas.height = height;
-    view.scale = Math.min(width / FIELD.width, height / FIELD.height);
-    view.x = (width - FIELD.width * view.scale) / 2;
-    view.y = (height - FIELD.height * view.scale) / 2;
+function drawLamps(ctx) {
+  for (const lamp of LEVEL.lamps) {
+    const glow = ctx.createRadialGradient(lamp.x, lamp.y, 8, lamp.x, lamp.y, lamp.r);
+    glow.addColorStop(0, COLORS.lampGlow);
+    glow.addColorStop(1, 'rgba(255, 196, 110, 0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(lamp.x, lamp.y, lamp.r, 0, Math.PI * 2);
+    ctx.fill();
+    // The lamp itself: a small brass dot on the floor.
+    ctx.fillStyle = '#c9a24a';
+    ctx.beginPath();
+    ctx.arc(lamp.x, lamp.y, 4, 0, Math.PI * 2);
+    ctx.fill();
   }
+}
 
-  const fonts = new Map();
-  function text(value, x, y, size, color, align) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align;
-    context.fillText(value, x, y);
+function drawRect(ctx, r, fill, top) {
+  ctx.fillStyle = fill;
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+  ctx.fillStyle = top;
+  ctx.fillRect(r.x, r.y, r.w, 5);
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(r.x + 0.5, r.y + 0.5, r.w, r.h);
+}
+
+function drawBush(ctx, b, t) {
+  // Ferns sway almost imperceptibly; the sway is a function of time so
+  // a screenshot at a fixed time is reproducible.
+  ctx.fillStyle = COLORS.bush;
+  ctx.beginPath();
+  ctx.ellipse(b.x + b.w / 2, b.y + b.h / 2, b.w / 2, b.h / 2, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = COLORS.bushTop;
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 + Math.sin(t * 0.6 + i) * 0.05;
+    const cx = b.x + b.w / 2 + Math.cos(a) * b.w * 0.26;
+    const cy = b.y + b.h / 2 + Math.sin(a) * b.h * 0.26;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 7, 0, Math.PI * 2);
+    ctx.fill();
   }
+}
 
-  function drawField(state) {
-    context.fillStyle = PALETTE.sky;
-    context.fillRect(0, 0, FIELD.width, FIELD.height);
-    context.fillStyle = PALETTE.ground;
-    context.fillRect(0, FIELD.groundY, FIELD.width, FIELD.height - FIELD.groundY);
+function drawIntel(ctx, item, t) {
+  if (item.collected) return;
+  const bob = Math.sin(t * 2.4 + item.x) * 3;
+  const cx = item.x;
+  const cy = item.y + bob;
+  const glow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 30);
+  glow.addColorStop(0, 'rgba(125, 227, 255, 0.5)');
+  glow.addColorStop(1, 'rgba(125, 227, 255, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 30, 0, Math.PI * 2);
+  ctx.fill();
+  // A small glowing page with folded corner.
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(-0.12);
+  ctx.fillStyle = '#eaf7ff';
+  ctx.fillRect(-9, -12, 18, 24);
+  ctx.fillStyle = COLORS.intel;
+  ctx.fillRect(-6, -7, 12, 2);
+  ctx.fillRect(-6, -2, 12, 2);
+  ctx.fillRect(-6, 3, 8, 2);
+  ctx.restore();
+  ctx.fillStyle = COLORS.intel;
+  ctx.font = 'bold 10px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(item.label, cx, cy + 30);
+}
 
-    const items = state.items;
-    for (let index = 0; index < items.length; index += 1) {
-      const item = items[index];
-      if (!item.active) continue;
-      if (item.kind === KIND_COIN) {
-        context.fillStyle = PALETTE.coin;
-        context.beginPath();
-        context.arc(item.x + item.width / 2, item.y + item.height / 2, item.width / 2, 0, Math.PI * 2);
-        context.fill();
-      } else {
-        context.fillStyle = PALETTE.block;
-        context.fillRect(item.x, item.y, item.width, item.height);
-      }
-    }
-
-    const player = state.player;
-    // Blink while invulnerable after a hit: hidden on every other tenth of a second.
-    if (player.invulnerable === 0 || Math.floor(player.invulnerable * 10) % 2 === 1) {
-      context.fillStyle = PALETTE.player;
-      context.fillRect(player.x, player.y, player.width, player.height);
-    }
+function drawExit(ctx, open, t) {
+  const e = LEVEL.exit;
+  ctx.fillStyle = open ? COLORS.exit : '#3f7d5a';
+  ctx.fillRect(e.x, e.y, e.w, e.h);
+  ctx.strokeStyle = open ? '#a9f0c6' : '#2c5a40';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(e.x + 1, e.y + 1, e.w - 2, e.h - 2);
+  if (open) {
+    const pulse = 0.5 + Math.sin(t * 3) * 0.5;
+    ctx.fillStyle = `rgba(88, 214, 141, ${0.25 + pulse * 0.25})`;
+    ctx.fillRect(e.x - 6, e.y - 6, e.w + 12, e.h + 12);
   }
+  ctx.fillStyle = '#0c2418';
+  ctx.font = 'bold 11px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(open ? 'EXIT — GO!' : 'EXIT', e.x + e.w / 2, e.y + e.h / 2 + 4);
+}
 
-  function drawHud(state) {
-    context.textBaseline = 'top';
-    text(scoreLabel(state.score), 24, 20, 28, PALETTE.text, 'left');
-    text(levelLabel(state.level), FIELD.width / 2, 20, 28, PALETTE.text, 'center');
-    const firstLife = FIELD.width - 24 - LIVES * (LIFE_SIZE + LIFE_GAP) + LIFE_GAP;
-    text('Lives', firstLife - 12, 20, 28, PALETTE.text, 'right');
-    for (let life = 0; life < LIVES; life += 1) {
-      context.fillStyle = life < state.lives ? PALETTE.player : PALETTE.ground;
-      context.fillRect(firstLife + life * (LIFE_SIZE + LIFE_GAP), 24, LIFE_SIZE, LIFE_SIZE);
-    }
+function drawCone(ctx, guard) {
+  const points = conePolygon(guard);
+  const color =
+    guard.state === 'alerted'
+      ? COLORS.coneAlert
+      : guard.state === 'suspicious' || guard.state === 'search'
+        ? COLORS.coneSuspicious
+        : COLORS.coneCalm;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle =
+    guard.state === 'alerted' ? 'rgba(255, 80, 80, 0.8)' : COLORS.coneEdge;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
+function drawGuard(ctx, guard) {
+  drawCone(ctx, guard);
+  // Body: red coat, darker outline, facing tick.
+  ctx.fillStyle = COLORS.guardDark;
+  ctx.beginPath();
+  ctx.arc(guard.x, guard.y, GUARD.radius + 1.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = COLORS.guardBody;
+  ctx.beginPath();
+  ctx.arc(guard.x, guard.y, GUARD.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#2a0d0d';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(guard.x, guard.y);
+  ctx.lineTo(guard.x + Math.cos(guard.facing) * (GUARD.radius + 6), guard.y + Math.sin(guard.facing) * (GUARD.radius + 6));
+  ctx.stroke();
+  // Eyes: two dots looking where the guard looks.
+  const ex = Math.cos(guard.facing);
+  const ey = Math.sin(guard.facing);
+  const px = -ey;
+  const py = ex;
+  ctx.fillStyle = '#ffe9b0';
+  ctx.beginPath();
+  ctx.arc(guard.x + ex * 5 + px * 4, guard.y + ey * 5 + py * 4, 1.8, 0, Math.PI * 2);
+  ctx.arc(guard.x + ex * 5 - px * 4, guard.y + ey * 5 - py * 4, 1.8, 0, Math.PI * 2);
+  ctx.fill();
+  // Suspicion arc above the head: ? while curious, ! while alerted.
+  if (guard.suspicion > 0.02) {
+    ctx.fillStyle = guard.state === 'alerted' ? '#ff5252' : '#ffb347';
+    ctx.font = 'bold 16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(guard.state === 'alerted' ? '!' : '?', guard.x, guard.y - GUARD.radius - 8);
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(guard.x, guard.y, GUARD.radius + 5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * guard.suspicion);
+    ctx.stroke();
+    ctx.strokeStyle = guard.state === 'alerted' ? '#ff5252' : '#ffb347';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(guard.x, guard.y, GUARD.radius + 5, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * guard.suspicion);
+    ctx.stroke();
   }
+}
 
-  function drawPanel(title, lines, prompt) {
-    const height = PANEL.top + lines.length * PANEL.line + PANEL.bottom;
-    const x = (FIELD.width - PANEL.width) / 2;
-    const y = (FIELD.height - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, PANEL.width, height);
-    context.textBaseline = 'alphabetic';
-    text(title, FIELD.width / 2, y + 78, 48, PALETTE.text, 'center');
-    for (let index = 0; index < lines.length; index += 1) {
-      text(lines[index], FIELD.width / 2, y + PANEL.top + index * PANEL.line, 22, PALETTE.muted, 'center');
-    }
-    text(prompt, FIELD.width / 2, y + height - 40, 24, PALETTE.coin, 'center');
+function drawPlayer(ctx, player, t) {
+  // A soft shadow ring while hidden in a fern.
+  if (player.hidden) {
+    ctx.fillStyle = 'rgba(63, 112, 68, 0.55)';
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, 17, 0, Math.PI * 2);
+    ctx.fill();
   }
-
-  const TITLE_LINES = ['Dodge the red blocks. Catch the gold coins.', 'Move with ← → or A D.  Pause with P.', ''];
-  const PAUSED_LINES = ['The blocks will wait for you.'];
-  const OVER_LINES = ['', ''];
-
-  /** Paint one frame: the field, then the HUD or a panel for the screen the game is on. */
-  function draw(state, screen, best) {
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = PALETTE.backdrop;
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
-    drawField(state);
-    if (screen === SCREEN_TITLE) {
-      TITLE_LINES[2] = bestLabel(best);
-      drawPanel('Block Dodger', TITLE_LINES, 'Press Space or click to start');
-      return;
-    }
-    drawHud(state);
-    if (screen === SCREEN_PAUSED) drawPanel('Paused', PAUSED_LINES, 'Press P to resume');
-    else if (screen === SCREEN_OVER) {
-      OVER_LINES[0] = finalLabel(state.score);
-      OVER_LINES[1] = bestLabel(best);
-      drawPanel('Game over', OVER_LINES, 'Press Space or click to play again');
-    }
+  // Noise ring while running: what the guards can hear.
+  if (player.moving && player.running) {
+    ctx.strokeStyle = 'rgba(232, 210, 122, 0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(player.x, player.y, 20 + Math.sin(t * 10) * 3, 0, Math.PI * 2);
+    ctx.stroke();
   }
+  ctx.fillStyle = COLORS.playerDark;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, 12.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = COLORS.playerBody;
+  ctx.beginPath();
+  ctx.arc(player.x, player.y, 11, 0, Math.PI * 2);
+  ctx.fill();
+  // Facing tick and a little hood point.
+  ctx.strokeStyle = '#5c4a12';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(player.x, player.y);
+  ctx.lineTo(player.x + Math.cos(player.facing) * 16, player.y + Math.sin(player.facing) * 16);
+  ctx.stroke();
+  ctx.fillStyle = '#fff3c4';
+  ctx.beginPath();
+  ctx.arc(player.x + Math.cos(player.facing) * 4, player.y + Math.sin(player.facing) * 4, 3, 0, Math.PI * 2);
+  ctx.fill();
+  if (player.sneaking) {
+    ctx.fillStyle = COLORS.dimText;
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('sneaking', player.x, player.y + 26);
+  }
+}
 
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+function drawHud(ctx, state) {
+  const { collected, total, timeSec, alert, detections } = state.hud;
+  ctx.fillStyle = 'rgba(8, 8, 14, 0.72)';
+  ctx.fillRect(0, 0, GAME.width, 34);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = 'bold 14px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('SHADOW LEDGER', 12, 22);
+  ctx.fillStyle = COLORS.intel;
+  ctx.fillText(`LEDGER ${collected}/${total}`, 190, 22);
+  const mm = String(Math.floor(timeSec / 60)).padStart(2, '0');
+  const ss = String(Math.floor(timeSec % 60)).padStart(2, '0');
+  ctx.fillStyle = COLORS.text;
+  ctx.fillText(`${mm}:${ss}`, 330, 22);
+  // Alert meter: the highest suspicion among all guards.
+  ctx.fillStyle = COLORS.dimText;
+  ctx.font = '12px monospace';
+  ctx.fillText('ALERT', 420, 22);
+  ctx.fillStyle = '#33222a';
+  ctx.fillRect(470, 11, 150, 12);
+  ctx.fillStyle = alert > 0.66 ? '#ff5252' : alert > 0.33 ? '#ffb347' : '#58d68d';
+  ctx.fillRect(470, 11, 150 * Math.min(alert, 1), 12);
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(470.5, 11.5, 150, 12);
+  ctx.fillStyle = COLORS.dimText;
+  ctx.fillText(`SPOTTED ${detections}x`, 640, 22);
+  ctx.textAlign = 'right';
+  ctx.fillText(state.phase === 'playing' ? 'SHIFT sneak · R run · click to move' : '', GAME.width - 12, 22);
+  ctx.textAlign = 'left';
+}
+
+function drawBanner(ctx, title, lines, accent) {
+  ctx.fillStyle = 'rgba(6, 6, 12, 0.72)';
+  ctx.fillRect(0, 0, GAME.width, GAME.height);
+  ctx.fillStyle = accent;
+  ctx.font = 'bold 44px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, GAME.width / 2, 250);
+  ctx.fillStyle = COLORS.text;
+  ctx.font = '16px monospace';
+  lines.forEach((line, i) => ctx.fillText(line, GAME.width / 2, 300 + i * 28));
+  ctx.fillStyle = COLORS.dimText;
+  ctx.font = '13px monospace';
+  ctx.fillText('Press ENTER or click to play again', GAME.width / 2, 300 + lines.length * 28 + 26);
+  ctx.textAlign = 'left';
+}
+
+// The whole frame: world, then actors, then HUD, then any overlay.
+export function render(ctx, state, t) {
+  ctx.clearRect(0, 0, GAME.width, GAME.height);
+  drawFloor(ctx);
+  drawLamps(ctx);
+  drawExit(ctx, state.collected >= state.total, t);
+  for (const item of state.intel) drawIntel(ctx, item, t);
+  for (const crate of LEVEL.crates) drawRect(ctx, crate, COLORS.crate, COLORS.crateTop);
+  for (const bush of LEVEL.bushes) drawBush(ctx, bush, t);
+  for (const wall of LEVEL.walls) drawRect(ctx, wall, COLORS.wall, COLORS.wallTop);
+  for (const guard of state.guards) drawGuard(ctx, guard);
+  drawPlayer(ctx, state.player, t);
+  drawHud(ctx, state);
+
+  if (state.phase === 'title') {
+    drawBanner(
+      ctx,
+      'SHADOW LEDGER',
+      [
+        'The Meridian Archive, after dark.',
+        'Recover 3 ledger pages. Reach the green exit unseen.',
+        'WASD / arrows to move · SHIFT to sneak · click to walk',
+        'Ferns hide you. Crates and shelves block sight.',
+        'A ? means a guard is curious. A ! means RUN — or hide.',
+      ],
+      COLORS.playerBody,
+    );
+    ctx.fillStyle = COLORS.dimText;
+    ctx.font = '13px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Press ENTER or click to begin', GAME.width / 2, 300 + 5 * 28 + 26);
+    ctx.textAlign = 'left';
+  } else if (state.phase === 'won') {
+    drawBanner(
+      ctx,
+      'LEDGER RECOVERED',
+      [
+        `All 3 pages safe. Time ${state.hud.timeText} · spotted ${state.detections} time(s).`,
+        state.detections === 0
+          ? 'A perfect ghost run — no guard ever raised the alarm.'
+          : 'The archive never knew you were there… mostly.',
+      ],
+      COLORS.exit,
+    );
+  } else if (state.phase === 'caught') {
+    drawBanner(
+      ctx,
+      'CAUGHT',
+      [
+        'A guard laid hands on the courier.',
+        `Pages recovered: ${state.collected} of ${state.total}.`,
+        'Patience beats speed. Watch the patrols, use the ferns.',
+      ],
+      '#ff5252',
+    );
+  }
 }
