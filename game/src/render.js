@@ -130,7 +130,7 @@ function drawExit(ctx, open, t) {
   ctx.fillStyle = '#0c2418';
   ctx.font = 'bold 11px monospace';
   ctx.textAlign = 'center';
-  ctx.fillText(open ? 'EXIT — GO!' : 'EXIT', e.x + e.w / 2, e.y + e.h / 2 + 4);
+  ctx.fillText(open ? 'GO!' : 'EXIT', e.x + e.w / 2, e.y + e.h / 2 + 4);
 }
 
 function drawCone(ctx, guard) {
@@ -270,7 +270,7 @@ function drawHud(ctx, state) {
   ctx.fillStyle = COLORS.dimText;
   ctx.fillText(`SPOTTED ${detections}x`, 640, 22);
   ctx.textAlign = 'right';
-  ctx.fillText(state.phase === 'playing' ? 'SHIFT sneak · R run · click to move' : '', GAME.width - 12, 22);
+  ctx.fillText(state.phase === 'playing' ? 'SHIFT sneak · click to move' : '', GAME.width - 12, 22);
   ctx.textAlign = 'left';
 }
 
@@ -317,11 +317,6 @@ export function render(ctx, state, t) {
       ],
       COLORS.playerBody,
     );
-    ctx.fillStyle = COLORS.dimText;
-    ctx.font = '13px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Press ENTER or click to begin', GAME.width / 2, 300 + 5 * 28 + 26);
-    ctx.textAlign = 'left';
   } else if (state.phase === 'won') {
     drawBanner(
       ctx,
